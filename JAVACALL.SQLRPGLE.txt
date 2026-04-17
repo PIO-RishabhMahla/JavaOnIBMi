@@ -1,0 +1,95 @@
+**FREE
+// ============================================================
+// Program  : JVACALL
+// Purpose  : Java bridge service program  constructs a QShell
+//            command that invokes a Java class via the PASE JVM,
+//            executes it using QSYS/QSH, and returns the JVM
+//            exit code to the caller
+// Author   : Developer
+// Date     : 2026-04-15
+// Changes  :
+//   2026-04-15  Developer  INC#0001  Initial creation
+// ============================================================
+
+Ctl-Opt Option(*SrcStmt : *NoDebugIO)
+        DftActGrp(*No)
+        ActGrp('APPGRP')
+        BndDir('QC2LE' : 'APPBND')
+        NoMain
+        ExtBinInt(*Yes)
+        Date(*ISO)
+        DateFmt(*ISO)
+        TimFmt(*ISO)
+        AlwNull(*UsrCtl)
+        Debug(*Yes);
+
+/COPY QCPYSRC,APPPROTS
+
+// --- QCMDEXC prototype for running CL commands from RPGLE ---
+Dcl-Pr QCmdExc  ExtPgm('QCMDEXC');
+  command   Char(32702) Const Options(*VarSize);
+  cmdLen    Packed(15:5) Const;
+End-Pr;
+
+// --- QSYS/QSH executes a shell command string ---
+// QShell returns exit code in the CPF3C1D escape message;
+// we use QCMDEXC to call QSH CMD(...)
+Dcl-C QSH_PGM  'QSYS/QSH';
+
+// ============================================================
+// Procedure : CallJavaProgram
+// Purpose   : Build and execute a QShell command that launches
+//             a Java class via the IBM i PASE JVM; captures
+//             the shell exit code via *STATUS
+// Parameters: classPath  colon-delimited JAR/class path
+//             className  fully qualified Java class name
+//             progArgs   space-delimited argument string
+//             exitCode   returns the JVM process exit code
+// Returns   : *On if QSH executed without RPGLE error,
+//             *Off if the QCMDEXC call itself failed
+// ============================================================
+Dcl-Proc CallJavaProgram Export;
+  Dcl-Pi *N Ind;
+    classPath Varchar(2048) Const;
+    className Varchar(256)  Const;
+    progArgs  Varchar(1024) Const;
+    exitCode  Int(10);
+  End-Pi;
+
+  Dcl-S qshCommand  Varchar(4096) Inz(*Blanks);
+  Dcl-S fullCommand Char(32702)   Inz(*Blanks);
+  Dcl-S cmdLength   Packed(15:5)  Inz(0);
+  Dcl-S successFlag Ind           Inz(*Off);
+
+  exitCode = 0;
+
+  // -------------------------------------------------------
+  // Build QShell command string:
+  //   QSH CMD('java -cp <classpath> <class> <args>')
+  // JAVA_HOME is set via PASE environment; if not, prepend
+  // export JAVA_HOME=/QOpenSys/QIBM/ProdData/JavaVM/jdk80/32bit
+  // -------------------------------------------------------
+  qshCommand = 'QSH CMD(''java -cp ' +
+               %Trim(classPath) + ' ' +
+               %Trim(className) + ' ' +
+               %Trim(progArgs)  +
+               ''')';
+
+  fullCommand = qshCommand;
+  cmdLength   = %Len(%TrimR(qshCommand));
+
+  Monitor;
+    QCmdExc(fullCommand : cmdLength);
+    successFlag = *On;
+  On-Error *All;
+    // QSH raises CPF3C1D when the shell command exits non-zero
+    // Capture *STATUS as the Java exit code proxy
+    exitCode    = %Status();
+    successFlag = *Off;
+    LogError(exitCode : '     ' :
+             'CallJavaProgram : QSH failed status=' + %Char(exitCode));
+  EndMon;
+
+  Return successFlag;
+
+End-Proc;

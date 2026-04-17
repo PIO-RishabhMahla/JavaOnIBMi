@@ -1,0 +1,157 @@
+**FREE
+// ============================================================
+// Program  : CSVLDR
+// Purpose  : CSV loader service program \Z reads a comma-
+//            delimited IFS file row by row via IFSRDR and
+//            bulk-inserts parsed fields into DB2 CSVSTAGE
+// Author   : Developer
+// Date     : 2026-04-15
+// Changes  :
+//   2026-04-15  Developer  INC#0001  Initial creation
+// ============================================================
+
+Ctl-Opt Option(*SrcStmt : *NoDebugIO)
+        DftActGrp(*No)
+        ActGrp('APPGRP')
+        BndDir('QC2LE' : 'APPBND')
+        NoMain
+        ExtBinInt(*Yes)
+        Date(*ISO)
+        DateFmt(*ISO)
+        TimFmt(*ISO)
+        AlwNull(*UsrCtl)
+        Debug(*Yes);
+
+//COPY QRPGLESRC,APPPROTS
+
+// --- Constants ---
+Dcl-C MAX_COLS    20;
+Dcl-C COL_DELIM   ',';
+Dcl-C HEADER_TAG  'EMP_ID';   // First token of header row to skip
+
+// ============================================================
+// Procedure : LoadCsvToDb2
+// Purpose   : Open a CSV on IFS, skip the header row, parse
+//             each data row, insert into CSVSTAGE, commit
+// Parameters: csvPath   \Z absolute IFS path to CSV file
+//             rowsLoaded \Z returns count of rows inserted
+// Returns   : *On if all rows inserted, *Off on any error
+// ============================================================
+Dcl-Proc LoadCsvToDb2 Export;
+  Dcl-Pi *N Ind;
+    csvPath   Varchar(512) Const;
+    rowsLoaded Int(10);
+  End-Pi;
+
+  Dcl-S lineBuffer  Varchar(1024) Inz(*Blanks);
+  Dcl-S empId       Varchar(10)   Inz(*Blanks);
+  Dcl-S empName     Varchar(100)  Inz(*Blanks);
+  Dcl-S department  Varchar(50)   Inz(*Blanks);
+  Dcl-S salary      Packed(11:2)  Inz(0);
+  Dcl-S hireDate    Date;
+  Dcl-S colToken    Varchar(200)  Inz(*Blanks);
+  Dcl-S remainder   Varchar(1024) Inz(*Blanks);
+  Dcl-S delimPos    Int(10)       Inz(0);
+  Dcl-S successFlag Ind           Inz(*Off);
+
+  rowsLoaded = 0;
+
+  // Open the CSV file via IFSRDR service program
+  successFlag = OpenIfsFile(csvPath);
+  If Not successFlag;
+    LogError(0 : '     ' : 'LoadCsvToDb2 : cannot open ' + csvPath);
+    Return *Off;
+  EndIf;
+
+  // Purge any existing staged data before loading fresh set
+  Exec SQL DELETE FROM CSVSTAGE;
+  If SqlCode < 0;
+    LogError(SqlCode : SqlState : 'LoadCsvToDb2 : DELETE CSVSTAGE');
+    CloseIfsFile();
+    Return *Off;
+  EndIf;
+
+  // Read lines until EOF
+  Dou Not ReadAllLines(lineBuffer);
+
+    lineBuffer = %TrimR(lineBuffer);
+
+    // Skip blank lines
+    If lineBuffer = *Blanks;
+      Iter;
+    EndIf;
+
+    // Skip header row \Z identified by first token matching HEADER_TAG
+    If %Scan(HEADER_TAG : lineBuffer) = 1;
+      Iter;
+    EndIf;
+
+    // ---- Parse CSV columns by position ----
+    // Column order: EMP_ID, EMP_NAME, DEPARTMENT, SALARY, HIRE_DATE
+    remainder = lineBuffer;
+
+    // Column 1 \Z EMP_ID
+    delimPos = %Scan(COL_DELIM : remainder);
+    If delimPos = 0;
+      Iter;  // malformed row \Z skip
+    EndIf;
+    empId     = %SubSt(remainder : 1 : delimPos - 1);
+    remainder = %SubSt(remainder : delimPos + 1);
+
+    // Column 2 \Z EMP_NAME
+    delimPos = %Scan(COL_DELIM : remainder);
+    If delimPos = 0;
+      Iter;
+    EndIf;
+    empName   = %SubSt(remainder : 1 : delimPos - 1);
+    remainder = %SubSt(remainder : delimPos + 1);
+
+    // Column 3 \Z DEPARTMENT
+    delimPos = %Scan(COL_DELIM : remainder);
+    If delimPos = 0;
+      Iter;
+    EndIf;
+    department = %SubSt(remainder : 1 : delimPos - 1);
+    remainder  = %SubSt(remainder : delimPos + 1);
+
+    // Column 4 \Z SALARY
+    delimPos = %Scan(COL_DELIM : remainder);
+    If delimPos = 0;
+      Iter;
+    EndIf;
+    colToken  = %SubSt(remainder : 1 : delimPos - 1);
+    salary    = %Dec(%Trim(colToken) : 11 : 2);
+    remainder = %SubSt(remainder : delimPos + 1);
+
+    // Column 5 \Z HIRE_DATE (ISO format YYYY-MM-DD)
+    hireDate  = %Date(%Trim(remainder) : *ISO);
+
+    // Insert parsed row into staging table
+    Exec SQL
+      INSERT INTO CSVSTAGE
+        (EMP_ID, EMP_NAME, DEPARTMENT, SALARY, HIRE_DATE)
+      VALUES
+        (:empId, :empName, :department, :salary, :hireDate);
+
+    If SqlCode < 0;
+      LogError(SqlCode : SqlState : 'LoadCsvToDb2 : INSERT CSVSTAGE empId=' + empId);
+      CloseIfsFile();
+      Return *Off;
+    EndIf;
+
+    rowsLoaded += 1;
+
+  EndDo;
+
+  CloseIfsFile();
+
+  // Commit the batch
+  Exec SQL COMMIT;
+  If SqlCode < 0;
+    LogError(SqlCode : SqlState : 'LoadCsvToDb2 : COMMIT');
+    Return *Off;
+  EndIf;
+
+  Return *On;
+
+End-Proc;
